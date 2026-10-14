@@ -11,9 +11,9 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（既存データ保護対応版）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（機器台数マスタ対応版）", layout="wide")
 
-st.title("📦 製本管理業務 - 機器稼働優先 ＆ 作業区分マスタ管理システム")
+st.title("📦 製本管理業務 - 機器稼働優先 ＆ 機器台数マスタ管理システム")
 
 # ── 安全な整数変換ヘルパー関数 ──
 def safe_int(val, default=1):
@@ -54,6 +54,7 @@ with st.sidebar:
     st.header("1. 各種CSVデータの選択")
     f1 = st.file_uploader("CSV① 受注データ（必須）", type=["csv"])
     f_master = st.file_uploader("CSV④ 作業区分マスタ（任意: 工程,作業区分）", type=["csv"])
+    f_machine_count = st.file_uploader("CSV⑤ 機器台数マスタ（任意: 作業区分,保有台数）", type=["csv"])
     f2 = st.file_uploader("CSV② 休暇シフトデータ（任意）", type=["csv"])
     f3 = st.file_uploader("CSV③ 機械稼働NGデータ（任意）", type=["csv"])
     
@@ -124,7 +125,7 @@ else:
             if df_order_valid.empty:
                 st.warning("起算日以降の納期を持つ受注データが見つかりませんでした。")
             else:
-                # ── 2. 作業区分マスタの読み込みと自動割り当て（既存データ保護ルール適用） ──
+                # ── 2. 作業区分マスタの読み込み ──
                 master_dict = {}
                 if f_master is not None:
                     try:
@@ -147,17 +148,39 @@ else:
                     except Exception as me:
                         st.warning(f"作業区分マスタの読み込みに失敗しました: {me}")
 
+                # ── 3. 機器台数マスタの読み込み ──
+                machine_capacity_dict = {} # 作業区分ごとの保有台数
+                if f_machine_count is not None:
+                    try:
+                        mc_bytes = f_machine_count.read()
+                        try:
+                            df_mc = pd.read_csv(io.StringIO(mc_bytes.decode('utf-8')))
+                        except UnicodeDecodeError:
+                            df_mc = pd.read_csv(io.StringIO(mc_bytes.decode('cp932', errors='ignore')))
+                        df_mc.columns = df_mc.columns.str.strip()
+                        
+                        mc_div_col, mc_cnt_col = None, None
+                        for c in df_mc.columns:
+                            if '区分' in c or '作業区分' in c: mc_div_col = c
+                            if '台数' in c or '保有' in c or 'capacity' in c.lower(): mc_cnt_col = c
+                        if mc_div_col and mc_cnt_col:
+                            for _, mc_row in df_mc.iterrows():
+                                d_name = str(mc_row[mc_div_col]).strip()
+                                cnt = safe_int(mc_row[mc_cnt_col], 1)
+                                machine_capacity_dict[d_name] = cnt
+                    except Exception as mce:
+                        st.warning(f"機器台数マスタの読み込みに失敗しました: {mce}")
+
                 if '作業区分' not in df_order_valid.columns:
                     df_order_valid['作業区分'] = ""
 
                 def auto_assign_div(row):
                     current_div = str(row.get('作業区分', '')).strip()
-                    # 【既存データ保護ルール】すでに有効な作業区分（空欄でもNaNでもなく、「作業区分該当なし」でもない、または固有の入力値）がすでにある場合は上書きしない
+                    # 既存データ保護ルール：すでに有効な区分が入っていれば上書きしない
                     if current_div and current_div.lower() != 'nan' and current_div != '作業区分該当なし':
                         return current_div
                     
                     proc = str(row.get('工程', '')).strip()
-                    
                     if f_master is not None:
                         if proc in master_dict:
                             return master_dict[proc]
@@ -179,7 +202,7 @@ else:
 
                 st.markdown("---")
                 st.subheader("📋 工程別データ確認 ＆ 作業区分の手直しエディタ")
-                st.markdown("💡 既にデータ（作業区分）が入力されている箇所はマスタを読み込んでも書き換えられません。未登録の工程は**「作業区分該当なし」**になりますので、必要に応じてエディタで直接書き換えてください。")
+                st.markdown("💡 既に作業区分が入力されている箇所は保護されます。未登録の工程は「作業区分該当なし」になりますので必要に応じて修正してください。")
 
                 df_editor_view = df_order_valid.copy()
                 df_editor_view.insert(0, "除外する", False)
@@ -202,7 +225,7 @@ else:
                         st.error("すべての工程行が除外されています。")
                         st.session_state.calculated = False
                     else:
-                        # ── 3. CSV② 休暇シフトデータの読み込み ──
+                        # ── 4. CSV② 休暇シフトデータの読み込み ──
                         shift_staff_reduction = {}
                         shift_dates = set()
                         
@@ -233,7 +256,7 @@ else:
                             except Exception as e:
                                 st.warning(f"CSV②の読み込みに失敗しましたが続行します: {e}")
 
-                        # ── 4. CSV③ 機械稼働NGデータの読み込み ──
+                        # ── 5. CSV③ 機械稼働NGデータの読み込み ──
                         ng_schedule_rules = {}
                         if f3 is not None:
                             try:
@@ -266,7 +289,7 @@ else:
                             except Exception as g_err:
                                 st.warning(f"CSV③の読み込みに失敗しましたが続行します: {g_err}")
 
-                        # ── 5. 納品が早い順に受注を並べ替え ──
+                        # ── 6. 納品が早い順に受注を並べ替え ──
                         order_due_sort = df_target.groupby('受注番号')['納期'].min().reset_index()
                         order_due_sort = order_due_sort.sort_values(by=['納期', '受注番号'], ascending=[True, True])
                         sorted_order_ids = order_due_sort['受注番号'].tolist()
@@ -292,7 +315,7 @@ else:
                                     return True
                             return False
 
-                        # スケジュール計算メインループ（機械排他制御 ＋ マンパワー制御）
+                        # スケジュール計算メインループ（機器台数マスタを考慮した排他制御）
                         for order_id in sorted_order_ids:
                             group = df_target[df_target['受注番号'] == order_id]
                             rows = group.to_dict('records')
@@ -330,7 +353,11 @@ else:
                                 task_hours = duration_minutes / 60.0
                                 task_man_hours = staff_needed * task_hours
                                 
+                                # 機械かどうかの判定
                                 is_machine_work = any(kw in work_div for kw in ["機械", "機", "A", "B", "C"]) and not any(kw in work_div for kw in ["デスク", "外注", "エリア", "手作業", "該当なし"])
+                                
+                                # 機器台数マスタから許容台数を取得（未登録ならデフォルト1台）
+                                max_machine_limit = machine_capacity_dict.get(work_div, 1) if is_machine_work else 999
                                 
                                 target_date = last_task_end_date
                                 target_slot = last_task_end_slot
@@ -349,26 +376,28 @@ else:
                                         daily_slot_pool[d_str] = {
                                             "reduction": reduction,
                                             "effective_staff": effective_staff,
-                                            "AM": {"used": 0.0, "max": am_capacity, "machines_used": set()},
-                                            "PM": {"used": 0.0, "max": pm_capacity, "machines_used": set()}
+                                            "AM": {"used": 0.0, "max": am_capacity, "machine_counts": {}},
+                                            "PM": {"used": 0.0, "max": pm_capacity, "machine_counts": {}}
                                         }
                                     else:
                                         daily_slot_pool[d_str]["AM"]["max"] = am_capacity
                                         daily_slot_pool[d_str]["PM"]["max"] = pm_capacity
-                                        if "machines_used" not in daily_slot_pool[d_str]["AM"]:
-                                            daily_slot_pool[d_str]["AM"]["machines_used"] = set()
-                                        if "machines_used" not in daily_slot_pool[d_str]["PM"]:
-                                            daily_slot_pool[d_str]["PM"]["machines_used"] = set()
+                                        if "machine_counts" not in daily_slot_pool[d_str]["AM"]:
+                                            daily_slot_pool[d_str]["AM"]["machine_counts"] = {}
+                                        if "machine_counts" not in daily_slot_pool[d_str]["PM"]:
+                                            daily_slot_pool[d_str]["PM"]["machine_counts"] = {}
                                     
                                     is_ng = is_process_ng(d_str, target_slot, process, work_div)
                                     slot_data = daily_slot_pool[d_str][target_slot]
                                     
-                                    machine_conflict = is_machine_work and (work_div in slot_data["machines_used"])
+                                    # 現在そのスロットでその機械が何台使われているか
+                                    current_machine_booked = slot_data["machine_counts"].get(work_div, 0)
+                                    machine_limit_exceeded = is_machine_work and (current_machine_booked >= max_machine_limit)
                                     
-                                    if not is_ng and slot_key not in order_used_slots and not machine_conflict and (slot_data["used"] + task_man_hours <= slot_data["max"]):
+                                    if not is_ng and slot_key not in order_used_slots and not machine_limit_exceeded and (slot_data["used"] + task_man_hours <= slot_data["max"]):
                                         slot_data["used"] += task_man_hours
                                         if is_machine_work:
-                                            slot_data["machines_used"].add(work_div)
+                                            slot_data["machine_counts"][work_div] = current_machine_booked + 1
                                         order_used_slots.add(slot_key)
                                         break
                                     else:
@@ -431,7 +460,7 @@ else:
                         st.session_state.shift_dates = shift_dates
                         st.session_state.ng_schedule_rules = ng_schedule_rules
                         st.session_state.calculated = True
-                        st.success("スケジュール計算が完了しました！")
+                        st.success("機器台数マスタを反映したスケジュール計算が完了しました！")
 
                 # ── 計算済みデータの表示・出力セクション（セッション保持） ──
                 if st.session_state.calculated and st.session_state.df_schedule_out is not None:
