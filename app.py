@@ -3,10 +3,17 @@ import pandas as pd
 import io
 from datetime import datetime, timedelta
 
-# ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（重複防止対応版）", layout="wide")
+# WeasyPrintによるPDF生成用
+try:
+    import weasyprint
+    WEASYPRINT_AVAILABLE = True
+except ImportError:
+    WEASYPRINT_AVAILABLE = False
 
-st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し対応システム")
+# ページ基本設定
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（PDF出力対応版）", layout="wide")
+
+st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し・日別PDF出力システム")
 
 # ── 安全な整数変換ヘルパー関数 ──
 def safe_int(val, default=1):
@@ -29,7 +36,7 @@ with st.sidebar:
     am_hours = st.number_input("AM労働時間（例: 8:30〜12:00）", min_value=0.0, value=3.5)
     pm_hours = st.number_input("PM労働時間（例: 13:00〜17:30）", min_value=0.0, value=4.5)
     
-    deadline_offset = st.number_input("完成期日オフセット（納期の何日前までに完了させるか、通常は1日前）", min_value=0, value=1)
+    deadline_offset = st.number_input("完成期日オフセット（納期の何日前までに完了させるか）", min_value=0, value=1)
     start_base_date = st.date_input("シミュレーション開始基準日（起算日）", value=datetime.today().date())
 
 # メイン画面の処理
@@ -55,7 +62,7 @@ else:
         if df_order.empty:
             st.error("有効なプログラムデータが存在する行が見つかりませんでした。")
         else:
-            # 明細レコードIDの列を自動検出する
+            # 明細レコードIDの列を自動検出
             id_col_name = None
             for col in df_order.columns:
                 if '明細レコードID' in col or 'レコードID' in col or ('id' in col.lower() and '明細' in col):
@@ -88,8 +95,6 @@ else:
             else:
                 st.markdown("---")
                 st.subheader("📋 個別「工程行」除外エディタ（除外したい特定の工程にチェック）")
-                st.markdown("下の表の**「除外する」**列にチェックを入れた特定の行（工程）は、スケジュール計算から除外されます。")
-
                 df_editor_view = df_order_valid.copy()
                 df_editor_view.insert(0, "除外する", False)
 
@@ -109,7 +114,7 @@ else:
                     if df_target.empty:
                         st.error("すべての工程行が除外されています。")
                     else:
-                        # ── 2. CSV② 休暇シフトデータの読み込みと集計 ──
+                        # ── 2. CSV② 休暇シフトデータの読み込み ──
                         shift_staff_reduction = {}
                         shift_dates = set()
                         
@@ -183,7 +188,7 @@ else:
                             except Exception as g_err:
                                 st.warning(f"CSV③（機械稼働NGデータ）の読み込みに失敗しましたが続行します: {g_err}")
 
-                        # ── 4. 納品が早い順に受注を並べ替える処理 ──
+                        # ── 4. 納品が早い順に受注を並べ替え ──
                         order_due_sort = df_target.groupby('受注番号')['納期日付'].min().reset_index()
                         order_due_sort = order_due_sort.sort_values(by=['納期日付', '受注番号'], ascending=[True, True])
                         sorted_order_ids = order_due_sort['受注番号'].tolist()
@@ -208,12 +213,9 @@ else:
                                     return True
                                 elif slot_name == "PM" and any(k in r_time for k in ["PM", "午後", "13:", "14:", "15:", "16:", "17:"]):
                                     return True
-                                elif "14:00" in r_time or "15:00" in r_time:
-                                    if slot_name == "AM":
-                                        return True
                             return False
 
-                        # スケジュール計算のメインループ
+                        # スケジュール計算メインループ（同時刻重複防止対応）
                         for order_id in sorted_order_ids:
                             group = df_target[df_target['受注番号'] == order_id]
                             rows = group.to_dict('records')
@@ -237,15 +239,12 @@ else:
                             
                             order_first_start_date = None
                             order_last_end_date = None
-                            
-                            # ★同一受注内で既に割り当てた時間帯（日付, 時間帯）を記録するセット
                             order_used_slots = set()
                             
                             for row in sorted_rows:
                                 seq = safe_int(row.get("順"), 1)
                                 process = str(row.get("工程", ""))
                                 staff_needed = safe_int(row.get("人数"), 1)
-                                
                                 record_id = str(row.get(id_col_name, "")) if id_col_name else ""
                                 
                                 duration_minutes = float(row.get("所要時間", 120))
@@ -279,10 +278,9 @@ else:
                                     is_ng = is_process_ng(d_str, target_slot, process)
                                     slot_data = daily_slot_pool[d_str][target_slot]
                                     
-                                    # ★「NGでないこと」「同一受注がこの時間帯をまだ使用していないこと」「容量内であること」をチェック
                                     if not is_ng and slot_key not in order_used_slots and (slot_data["used"] + task_man_hours <= slot_data["max"]):
                                         slot_data["used"] += task_man_hours
-                                        order_used_slots.add(slot_key) # 使用済みスロットとして登録
+                                        order_used_slots.add(slot_key)
                                         break
                                     else:
                                         if target_slot == "AM":
@@ -323,9 +321,9 @@ else:
                                 if diff_days > 0:
                                     timing_status = f"🎉 納期より {diff_days} 日前に完成！"
                                 elif diff_days == 0:
-                                    timing_status = "⚡ 納期当日に完成（ギリギリ）"
+                                    timing_status = "⚡ 納期当日に完成"
                                 else:
-                                    timing_status = f"⚠️ 納期より {abs(diff_days)} 日遅延（要調整）"
+                                    timing_status = f"⚠️ 納期より {abs(diff_days)} 日遅延"
                                     
                                 order_summary_list.append({
                                     "受注番号": order_id,
@@ -337,9 +335,9 @@ else:
                                     "余裕日数": f"{diff_days}日"
                                 })
 
-                        st.success("選択された工程に基づくスケジュール計算が完了しました！")
+                        st.success("スケジュール計算が完了しました！")
                         
-                        # ── 出力①：品名・顧客名ごとの完成日＆余裕日数一覧 ──
+                        # ── 出力①：品名・顧客ごとの完成日一覧 ──
                         st.markdown("### 🎯 品名・顧客ごとの完成日 ＆ 何日前に完成かチェック")
                         df_order_summary = pd.DataFrame(order_summary_list)
                         st.dataframe(df_order_summary, use_container_width=True)
@@ -350,10 +348,93 @@ else:
                         df_schedule_out = df_schedule_out.sort_values(by=["割当作業日", "時間帯", "受注番号", "順番"])
                         st.dataframe(df_schedule_out, use_container_width=True)
                         
-                        # ── @pocket書き戻し用CSVのダウンロード（バイトエンコード方式） ──
+                        # ── 新機能：日別スケジュールPDFダウンロードセクション ──
+                        st.markdown("---")
+                        st.subheader("📄 日別スケジュール印刷用 PDFダウンロード")
+                        st.markdown("特定の日付の作業スケジュールを、現場掲示や確認用に綺麗なPDFレイアウトでダウンロードできます。")
+                        
+                        available_dates_pdf = sorted(df_schedule_out["割当作業日"].unique().tolist())
+                        if available_dates_pdf:
+                            col_p1, col_p2 = st.columns([2, 1])
+                            with col_p1:
+                                selected_pdf_date = st.selectbox("PDF出力する作業日を選択", available_dates_pdf, key="pdf_date_select")
+                            with col_p2:
+                                st.markdown("<br>", unsafe_allow_html=True)
+                                if WEASYPRINT_AVAILABLE:
+                                    # 該当日のデータを抽出
+                                    df_day_target = df_schedule_out[df_schedule_out["割当作業日"] == selected_pdf_date]
+                                    
+                                    # HTML構築
+                                    html_pdf_content = f"""
+                                    <html>
+                                    <head>
+                                        <meta charset="utf-8">
+                                        <style>
+                                            @page {{ size: A4 landscape; margin: 15mm; }}
+                                            body {{ font-family: sans-serif; color: #333; font-size: 11pt; }}
+                                            h1 {{ font-size: 18pt; border-bottom: 2px solid #333; padding-bottom: 5px; margin-bottom: 10px; }}
+                                            .meta {{ margin-bottom: 15px; font-weight: bold; }}
+                                            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+                                            th, td {{ border: 1px solid #bbb; padding: 8px 10px; text-align: left; font-size: 10pt; }}
+                                            th {{ background-color: #f0f0f0; }}
+                                            .center {{ text-align: center; }}
+                                        </style>
+                                    </head>
+                                    <body>
+                                        <h1>製本管理システム - 日別作業スケジュール</h1>
+                                        <div class="meta">対象作業日: {selected_pdf_date} （出力日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}）</div>
+                                        <table>
+                                            <thead>
+                                                <tr>
+                                                    <th style="width: 15%;">時間帯</th>
+                                                    <th style="width: 10%;">受注番号</th>
+                                                    <th style="width: 20%;">案件名（品名）</th>
+                                                    <th style="width: 15%;">顧客名</th>
+                                                    <th style="width: 15%;">工程</th>
+                                                    <th style="width: 10%;">作業時間</th>
+                                                    <th style="width: 15%;">納期</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                    """
+                                    
+                                    for _, d_row in df_day_target.iterrows():
+                                        html_pdf_content += f"""
+                                                <tr>
+                                                    <td>{d_row['時間帯']}</td>
+                                                    <td>{d_row['受注番号']}</td>
+                                                    <td>{d_row['案件名']}</td>
+                                                    <td>{d_row['顧客名']}</td>
+                                                    <td><b>{d_row['工程']}</b></td>
+                                                    <td>{d_row['作業時間']}</td>
+                                                    <td>{d_row['納期']}</td>
+                                                </tr>
+                                        """
+                                        
+                                    html_pdf_content += """
+                                            </tbody>
+                                        </table>
+                                    </body>
+                                    </html>
+                                    """
+                                    
+                                    try:
+                                        pdf_data = weasyprint.HTML(string=html_pdf_content).write_pdf()
+                                        st.download_button(
+                                            label=f"📥 {selected_pdf_date} のスケジュールPDFをダウンロード",
+                                            data=pdf_data,
+                                            file_name=f"schedule_{selected_pdf_date}.pdf",
+                                            mime="application/pdf",
+                                            type="primary"
+                                        )
+                                    except Exception as pdf_err:
+                                        st.error(f"PDF生成中にエラーが発生しました: {pdf_err}")
+                                else:
+                                    st.warning("PDF生成ライブラリ(WeasyPrint)が利用できません。")
+
+                        # ── @pocket書き戻し用CSVのダウンロード ──
                         st.markdown("---")
                         st.subheader("📥 @pocket書き戻し用データのダウンロード")
-                        st.markdown("指定した作業日の完了分を絞り込み、完了ステータスを **「完了」**（未了の場合は **空欄**）にして@pocket書き戻し用CSVをダウンロードできます。")
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -366,15 +447,10 @@ else:
                             "受注番号", "工程", "割当作業日", "時間帯", "明細レコードID"
                         ]].copy()
                         
-                        # 日付で絞り込み
                         if selected_writeback_date != "すべて（全期間）":
                             df_pocket_export = df_pocket_export[df_pocket_export["割当作業日"] == selected_writeback_date]
                         
-                        # ステータス設定
-                        if status_choice == "完了":
-                            df_pocket_export["完了ステータス"] = "完了"
-                        else:
-                            df_pocket_export["完了ステータス"] = ""
+                        df_pocket_export["完了ステータス"] = "完了" if status_choice == "完了" else ""
                         
                         df_pocket_export = df_pocket_export[[
                             "受注番号", "工程", "割当作業日", "時間帯", "完了ステータス", "明細レコードID"
@@ -388,7 +464,7 @@ else:
                             label=f"📥 @pocket書き戻し用CSVをダウンロードする {target_label_text}",
                             data=csv_bytes,
                             file_name=f"pocket_writeback_{datetime.today().strftime('%Y%m%d')}.csv",
-                            mime="text/css" if False else "text/csv"
+                            mime="text/csv"
                         )
 
                         # ── 出力③：日ごと・AM/PMごとの稼働状況 ──
