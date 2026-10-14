@@ -8,7 +8,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（安定版）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（PDF・印刷対応版）", layout="wide")
 
 st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し・スケジュール管理システム")
 
@@ -21,7 +21,7 @@ def safe_int(val, default=1):
     except (ValueError, TypeError):
         return default
 
-# ── セッションステートの初期化（画面の再描画でデータが消えないように保持） ──
+# ── セッションステートの初期化 ──
 if "calculated" not in st.session_state:
     st.session_state.calculated = False
 if "df_schedule_out" not in st.session_state:
@@ -339,7 +339,7 @@ else:
                                     
                                 order_summary_list.append({
                                     "受注番号": order_id,
-                                "顧客名": customer,
+                                    "顧客名": customer,
                                     "品名（案件名）": item_name,
                                     "納品完成日（納期）": due_date_str,
                                     "予定完成日": planned_completion_str,
@@ -367,7 +367,7 @@ else:
                     st.markdown("### 📋 工程別 詳細スケジュール一覧")
                     st.dataframe(st.session_state.df_schedule_out, use_container_width=True)
                     
-                    # ── 新機能：日別スケジュールPDFダウンロード ──
+                    # ── 日別スケジュールPDFダウンロード ──
                     st.markdown("---")
                     st.subheader("📄 日別スケジュール PDFダウンロード")
                     st.markdown("特定の日付を選択してボタンを押すと、その日のスケジュール表（A4横長）をPDFファイルとしてダウンロードできます。")
@@ -381,13 +381,11 @@ else:
                         if st.button("📥 選択した日付のスケジュールPDFを生成する", type="primary"):
                             df_day_target = df_schedule_out[df_schedule_out["割当作業日"] == selected_pdf_date]
                             
-                            # ReportLabによるPDFバイト生成
                             pdf_buffer = io.BytesIO()
                             doc = SimpleDocTemplate(pdf_buffer, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
                             story = []
                             
                             styles = getSampleStyleSheet()
-                            # 日本語対応スタイルの安全な定義（内蔵フォントまたは標準フォント）
                             title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, leading=20, textColor=colors.HexColor('#1f1f1f'))
                             normal_style = ParagraphStyle('NormalStyle', parent=styles['Normal'], fontSize=9, leading=12)
                             bold_style = ParagraphStyle('BoldStyle', parent=styles['Normal'], fontSize=9, leading=12, fontName='Helvetica-Bold')
