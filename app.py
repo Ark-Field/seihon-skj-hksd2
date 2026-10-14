@@ -2,11 +2,15 @@ import streamlit as st
 import pandas as pd
 import io
 from datetime import datetime, timedelta
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（スケジュール管理システム）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（安定版）", layout="wide")
 
-st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し・日別スケジュール出力システム")
+st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し・スケジュール管理システム")
 
 # ── 安全な整数変換ヘルパー関数 ──
 def safe_int(val, default=1):
@@ -16,6 +20,20 @@ def safe_int(val, default=1):
         return int(float(str(val)))
     except (ValueError, TypeError):
         return default
+
+# ── セッションステートの初期化（画面の再描画でデータが消えないように保持） ──
+if "calculated" not in st.session_state:
+    st.session_state.calculated = False
+if "df_schedule_out" not in st.session_state:
+    st.session_state.df_schedule_out = None
+if "df_order_summary" not in st.session_state:
+    st.session_state.df_order_summary = None
+if "daily_slot_pool" not in st.session_state:
+    st.session_state.daily_slot_pool = None
+if "shift_dates" not in st.session_state:
+    st.session_state.shift_dates = set()
+if "ng_schedule_rules" not in st.session_state:
+    st.session_state.ng_schedule_rules = {}
 
 # ── サイドバー：各種CSVデータの選択と制約パラメータ ──
 with st.sidebar:
@@ -106,6 +124,7 @@ else:
                 if st.button("🚀 選択した内容を反映してスケジュールを計算する", type="primary"):
                     if df_target.empty:
                         st.error("すべての工程行が除外されています。")
+                        st.session_state.calculated = False
                     else:
                         # ── 2. CSV② 休暇シフトデータの読み込み ──
                         shift_staff_reduction = {}
@@ -312,15 +331,15 @@ else:
                                 diff_days = (due_date - order_last_end_date).days
                                 
                                 if diff_days > 0:
-                                    timing_status = f"🎉 納期より {diff_days} 日前に完成！"
+                                    timing_status = f"納期より {diff_days} 日前に完成"
                                 elif diff_days == 0:
-                                    timing_status = "⚡ 納期当日に完成"
+                                    timing_status = "納期当日に完成"
                                 else:
-                                    timing_status = f"⚠️ 納期より {abs(diff_days)} 日遅延"
+                                    timing_status = f"納期より {abs(diff_days)} 日遅延"
                                     
                                 order_summary_list.append({
                                     "受注番号": order_id,
-                                    "顧客名": customer,
+                                "顧客名": customer,
                                     "品名（案件名）": item_name,
                                     "納品完成日（納期）": due_date_str,
                                     "予定完成日": planned_completion_str,
@@ -328,150 +347,168 @@ else:
                                     "余裕日数": f"{diff_days}日"
                                 })
 
+                        # セッションに保存
+                        st.session_state.df_schedule_out = pd.DataFrame(scheduled_results).sort_values(by=["割当作業日", "時間帯", "受注番号", "順番"])
+                        st.session_state.df_order_summary = pd.DataFrame(order_summary_list)
+                        st.session_state.daily_slot_pool = daily_slot_pool
+                        st.session_state.shift_dates = shift_dates
+                        st.session_state.ng_schedule_rules = ng_schedule_rules
+                        st.session_state.calculated = True
                         st.success("スケジュール計算が完了しました！")
-                        
-                        # ── 出力①：品名・顧客ごとの完成日一覧 ──
-                        st.markdown("### 🎯 品名・顧客ごとの完成日 ＆ 何日前に完成かチェック")
-                        df_order_summary = pd.DataFrame(order_summary_list)
-                        st.dataframe(df_order_summary, use_container_width=True)
-                        
-                        # ── 出力②：工程別 詳細スケジュール一覧 ──
-                        st.markdown("### 📋 工程別 詳細スケジュール一覧")
-                        df_schedule_out = pd.DataFrame(scheduled_results)
-                        df_schedule_out = df_schedule_out.sort_values(by=["割当作業日", "時間帯", "受注番号", "順番"])
-                        st.dataframe(df_schedule_out, use_container_width=True)
-                        
-                        # ── 新機能：日別スケジュール印刷・PDF保存プレビュー ──
-                        st.markdown("---")
-                        st.subheader("🖨️ 日別スケジュール 印刷・PDF保存ビュー")
-                        st.markdown("特定の日付を選んで「プレビュー表示」を行うと、そのままブラウザから印刷やPDF保存ができるレイアウトが表示されます。")
-                        
-                        available_dates_pdf = sorted(df_schedule_out["割当作業日"].unique().tolist())
-                        if available_dates_pdf:
-                            selected_print_date = st.selectbox("プレビュー・印刷する作業日を選択", available_dates_pdf, key="print_date_select")
-                            
-                            df_day_target = df_schedule_out[df_schedule_out["割当作業日"] == selected_print_date]
-                            
-                            # プレビュー用の綺麗なHTMLカードを作成
-                            print_html = f"""
-                            <div style="border: 2px solid #333; padding: 20px; border-radius: 8px; background-color: #fff; color: #000; font-family: sans-serif;">
-                                <h2 style="margin-top: 0; border-bottom: 2px solid #333; padding-bottom: 8px;">【製本管理システム】日別作業スケジュール</h2>
-                                <p style="font-size: 14px; font-weight: bold;">対象作業日: {selected_print_date} （出力日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}）</p>
-                                <table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 13px;">
-                                    <thead>
-                                        <tr style="background-color: #f2f2f2;">
-                                            <th style="border: 1px solid #999; padding: 8px; width: 18%;">時間帯</th>
-                                            <th style="border: 1px solid #999; padding: 8px; width: 10%;">受注番号</th>
-                                            <th style="border: 1px solid #999; padding: 8px; width: 22%;">案件名（品名）</th>
-                                            <th style="border: 1px solid #999; padding: 8px; width: 15%;">顧客名</th>
-                                            <th style="border: 1px solid #999; padding: 8px; width: 15%;">工程</th>
-                                            <th style="border: 1px solid #999; padding: 8px; width: 10%;">作業時間</th>
-                                            <th style="border: 1px solid #999; padding: 8px; width: 10%;">納期</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                            """
-                            
-                            for _, d_row in df_day_target.iterrows():
-                                print_html += f"""
-                                        <tr>
-                                            <td style="border: 1px solid #999; padding: 6px;">{d_row['時間帯']}</td>
-                                            <td style="border: 1px solid #999; padding: 6px; text-align: center;">{d_row['受注番号']}</td>
-                                            <td style="border: 1px solid #999; padding: 6px;">{d_row['案件名']}</td>
-                                            <td style="border: 1px solid #999; padding: 6px;">{d_row['顧客名']}</td>
-                                            <td style="border: 1px solid #999; padding: 6px; font-weight: bold;">{d_row['工程']}</td>
-                                            <td style="border: 1px solid #999; padding: 6px; text-align: center;">{d_row['作業時間']}</td>
-                                            <td style="border: 1px solid #999; padding: 6px; text-align: center;">{d_row['納期']}</td>
-                                        </tr>
-                                """
-                                
-                            print_html += """
-                                    </tbody>
-                                </table>
-                                <p style="margin-top: 15px; font-size: 12px; color: #555;">※ ブラウザの印刷機能（Ctrl + P または Cmd + P）を呼び出し、送信先を「PDFに保存」に設定することで、このままPDFとして保存できます。</p>
-                            </div>
-                            """
-                            
-                            st.markdown(print_html, unsafe_allow_html=True)
-                            st.markdown("")
-                            if st.button("🖨️ この日のスケジュールを印刷 / PDF保存する"):
-                                st.info("💡 ブラウザの印刷ダイアログが開きますので、プリンターまたは「PDFに保存」を選択してください。\n\n※ キーボードの **[Ctrl] + [P]** （Macは **[Cmd] + [P]**）キーを押しても印刷・PDF保存が可能です。")
 
-                        # ── @pocket書き戻し用CSVのダウンロード ──
-                        st.markdown("---")
-                        st.subheader("📥 @pocket書き戻し用データのダウンロード")
+                # ── 計算済みデータの表示・出力セクション（セッション保持） ──
+                if st.session_state.calculated and st.session_state.df_schedule_out is not None:
+                    
+                    st.markdown("---")
+                    st.markdown("### 🎯 品名・顧客ごとの完成日 ＆ 何日前に完成かチェック")
+                    st.dataframe(st.session_state.df_order_summary, use_container_width=True)
+                    
+                    st.markdown("---")
+                    st.markdown("### 📋 工程別 詳細スケジュール一覧")
+                    st.dataframe(st.session_state.df_schedule_out, use_container_width=True)
+                    
+                    # ── 新機能：日別スケジュールPDFダウンロード ──
+                    st.markdown("---")
+                    st.subheader("📄 日別スケジュール PDFダウンロード")
+                    st.markdown("特定の日付を選択してボタンを押すと、その日のスケジュール表（A4横長）をPDFファイルとしてダウンロードできます。")
+                    
+                    df_schedule_out = st.session_state.df_schedule_out
+                    available_dates_pdf = sorted(df_schedule_out["割当作業日"].unique().tolist())
+                    
+                    if available_dates_pdf:
+                        selected_pdf_date = st.selectbox("PDF出力する作業日を選択", available_dates_pdf, key="pdf_date_select")
                         
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            available_dates = sorted(df_schedule_out["割当作業日"].unique().tolist())
-                            selected_writeback_date = st.selectbox("書き戻し対象の作業日を選択", ["すべて（全期間）"] + available_dates)
-                        with col2:
-                            status_choice = st.selectbox("完了ステータスの値", ["完了", "未了（空欄）"])
-                        
-                        df_pocket_export = df_schedule_out[[
-                            "受注番号", "工程", "割当作業日", "時間帯", "明細レコードID"
-                        ]].copy()
-                        
-                        if selected_writeback_date != "すべて（全期間）":
-                            df_pocket_export = df_pocket_export[df_pocket_export["割当作業日"] == selected_writeback_date]
-                        
-                        df_pocket_export["完了ステータス"] = "完了" if status_choice == "完了" else ""
-                        
-                        df_pocket_export = df_pocket_export[[
-                            "受注番号", "工程", "割当作業日", "時間帯", "完了ステータス", "明細レコードID"
-                        ]]
-                        
-                        csv_text = df_pocket_export.to_csv(index=False)
-                        csv_bytes = csv_text.encode('cp932', errors='replace')
-                        
-                        target_label_text = f"【{selected_writeback_date}分】" if selected_writeback_date != "すべて（全期間）" else "【全期間】"
-                        st.download_button(
-                            label=f"📥 @pocket書き戻し用CSVをダウンロードする {target_label_text}",
-                            data=csv_bytes,
-                            file_name=f"pocket_writeback_{datetime.today().strftime('%Y%m%d')}.csv",
-                            mime="text/csv"
-                        )
+                        if st.button("📥 選択した日付のスケジュールPDFを生成する", type="primary"):
+                            df_day_target = df_schedule_out[df_schedule_out["割当作業日"] == selected_pdf_date]
+                            
+                            # ReportLabによるPDFバイト生成
+                            pdf_buffer = io.BytesIO()
+                            doc = SimpleDocTemplate(pdf_buffer, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
+                            story = []
+                            
+                            styles = getSampleStyleSheet()
+                            # 日本語対応スタイルの安全な定義（内蔵フォントまたは標準フォント）
+                            title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, leading=20, textColor=colors.HexColor('#1f1f1f'))
+                            normal_style = ParagraphStyle('NormalStyle', parent=styles['Normal'], fontSize=9, leading=12)
+                            bold_style = ParagraphStyle('BoldStyle', parent=styles['Normal'], fontSize=9, leading=12, fontName='Helvetica-Bold')
+                            
+                            story.append(Paragraph(f"【製本管理システム】日別作業スケジュール ({selected_pdf_date})", title_style))
+                            story.append(Spacer(1, 10))
+                            
+                            table_data = [["時間帯", "受注番号", "案件名", "顧客名", "工程", "作業時間", "納期"]]
+                            
+                            for _, r in df_day_target.iterrows():
+                                table_data.append([
+                                    Paragraph(str(r['時間帯']), normal_style),
+                                    Paragraph(str(r['受注番号']), normal_style),
+                                    Paragraph(str(r['案件名']), normal_style),
+                                    Paragraph(str(r['顧客名']), normal_style),
+                                    Paragraph(str(r['工程']), bold_style),
+                                    Paragraph(str(r['作業時間']), normal_style),
+                                    Paragraph(str(r['納期']), normal_style),
+                                ])
+                            
+                            col_widths = [110, 60, 180, 100, 100, 80, 80]
+                            t = Table(table_data, colWidths=col_widths)
+                            t.setStyle(TableStyle([
+                                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#e0e0e0')),
+                                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#999999')),
+                                ('TOPPADDING', (0,0), (-1,-1), 6),
+                                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+                            ]))
+                            
+                            story.append(t)
+                            doc.build(story)
+                            pdf_bytes = pdf_buffer.getvalue()
+                            
+                            st.download_button(
+                                label=f"📥 【{selected_pdf_date}】PDFファイルをダウンロードする",
+                                data=pdf_bytes,
+                                file_name=f"schedule_{selected_pdf_date}.pdf",
+                                mime="application/pdf",
+                                key="download_pdf_btn"
+                            )
 
-                        # ── 出力③：日ごと・AM/PMごとの稼働状況 ──
-                        st.markdown("---")
-                        st.markdown("### 📊 日別・AM/PM別の稼働状況 ＆ 残業時間算出テーブル")
-                        summary_list = []
-                        for d, s_info in sorted(daily_slot_pool.items()):
-                            reduction = s_info["reduction"]
-                            eff_staff = s_info["effective_staff"]
+                    # ── @pocket書き戻し用CSVのダウンロード ──
+                    st.markdown("---")
+                    st.subheader("📥 @pocket書き戻し用データのダウンロード")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        selected_writeback_date = st.selectbox("書き戻し対象の作業日を選択", ["すべて（全期間）"] + available_dates_pdf)
+                    with col2:
+                        status_choice = st.selectbox("完了ステータスの値", ["完了", "未了（空欄）"])
+                    
+                    df_pocket_export = df_schedule_out[[
+                        "受注番号", "工程", "割当作業日", "時間帯", "明細レコードID"
+                    ]].copy()
+                    
+                    if selected_writeback_date != "すべて（全期間）":
+                        df_pocket_export = df_pocket_export[df_pocket_export["割当作業日"] == selected_writeback_date]
+                    
+                    df_pocket_export["完了ステータス"] = "完了" if status_choice == "完了" else ""
+                    
+                    df_pocket_export = df_pocket_export[[
+                        "受注番号", "工程", "割当作業日", "時間帯", "完了ステータス", "明細レコードID"
+                    ]]
+                    
+                    csv_text = df_pocket_export.to_csv(index=False)
+                    csv_bytes = csv_text.encode('cp932', errors='replace')
+                    
+                    target_label_text = f"【{selected_writeback_date}分】" if selected_writeback_date != "すべて（全期間）" else "【全期間】"
+                    st.download_button(
+                        label=f"📥 @pocket書き戻し用CSVをダウンロードする {target_label_text}",
+                        data=csv_bytes,
+                        file_name=f"pocket_writeback_{datetime.today().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+
+                    # ── 出力③：日ごと・AM/PMごとの稼働状況 ──
+                    st.markdown("---")
+                    st.markdown("### 📊 日別・AM/PM別の稼働状況 ＆ 残業時間算出テーブル")
+                    summary_list = []
+                    daily_slot_pool = st.session_state.daily_slot_pool
+                    shift_dates = st.session_state.shift_dates
+                    ng_schedule_rules = st.session_state.ng_schedule_rules
+                    
+                    for d, s_info in sorted(daily_slot_pool.items()):
+                        reduction = s_info["reduction"]
+                        eff_staff = s_info["effective_staff"]
+                        
+                        am_used = s_info["AM"]["used"]
+                        am_max = s_info["AM"]["max"]
+                        pm_used = s_info["PM"]["used"]
+                        pm_max = s_info["PM"]["max"]
+                        
+                        total_max = am_max + pm_max
+                        total_used = am_used + pm_used
+                        overtime_hours = max(0.0, total_used - total_max)
+                        
+                        staff_desc = f"基本{base_staff}人 - 休み{reduction}人 = 有効{eff_staff}人" if reduction > 0 else f"有効{eff_staff}人 (通常)"
+                        
+                        remarks = []
+                        if d in shift_dates:
+                            remarks.append(f"スタッフ休み(-{reduction}人)")
+                        if d in ng_schedule_rules:
+                            ng_desc_list = [f"{r['process']}({r['time_period']})" for r in ng_schedule_rules[d]]
+                            remarks.append(f"NG: {', '.join(ng_desc_list)}")
+                        if overtime_hours > 0:
+                            remarks.append(f"⚠️要残業({overtime_hours:.1f}h)")
                             
-                            am_used = s_info["AM"]["used"]
-                            am_max = s_info["AM"]["max"]
-                            pm_used = s_info["PM"]["used"]
-                            pm_max = s_info["PM"]["max"]
+                        remark_str = " / ".join(remarks) if remarks else "通常稼働"
                             
-                            total_max = am_max + pm_max
-                            total_used = am_used + pm_used
-                            overtime_hours = max(0.0, total_used - total_max)
-                            
-                            staff_desc = f"基本{base_staff}人 - 休み{reduction}人 = 有効{eff_staff}人" if reduction > 0 else f"有効{eff_staff}人 (通常)"
-                            
-                            remarks = []
-                            if d in shift_dates:
-                                remarks.append(f"スタッフ休み(-{reduction}人)")
-                            if d in ng_schedule_rules:
-                                ng_desc_list = [f"{r['process']}({r['time_period']})" for r in ng_schedule_rules[d]]
-                                remarks.append(f"NG: {', '.join(ng_desc_list)}")
-                            if overtime_hours > 0:
-                                remarks.append(f"⚠️要残業({overtime_hours:.1f}h)")
-                                
-                            remark_str = " / ".join(remarks) if remarks else "通常稼働"
-                                
-                            summary_list.append({
-                                "日付": d,
-                                "有効人員状況": staff_desc,
-                                "AM利用状況": f"消費 {am_used:.1f}h / 上限 {am_max:.1f}h",
-                                "PM利用状況": f"消費 {pm_used:.1f}h / 上限 {pm_max:.1f}h",
-                                "算出残業時間": f"{overtime_hours:.1f} 時間" if overtime_hours > 0 else "なし (0.0h)",
-                                "スケジュール備考": remark_str
-                            })
-                        df_summary_out = pd.DataFrame(summary_list)
-                        st.dataframe(df_summary_out, use_container_width=True)
+                        summary_list.append({
+                            "日付": d,
+                            "有効人員状況": staff_desc,
+                            "AM利用状況": f"消費 {am_used:.1f}h / 上限 {am_max:.1f}h",
+                            "PM利用状況": f"消費 {pm_used:.1f}h / 上限 {pm_max:.1f}h",
+                            "算出残業時間": f"{overtime_hours:.1f} 時間" if overtime_hours > 0 else "なし (0.0h)",
+                            "スケジュール備考": remark_str
+                        })
+                    df_summary_out = pd.DataFrame(summary_list)
+                    st.dataframe(df_summary_out, use_container_width=True)
 
     except Exception as e:
         st.error(f"エラーが発生しました: {str(e)}")
