@@ -4,9 +4,18 @@ import io
 from datetime import datetime, timedelta
 
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（ステータス対応）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（重複防止対応版）", layout="wide")
 
 st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し対応システム")
+
+# ── 安全な整数変換ヘルパー関数 ──
+def safe_int(val, default=1):
+    if pd.isna(val) or str(val).strip() == '' or str(val).lower() == 'nan':
+        return default
+    try:
+        return int(float(str(val)))
+    except (ValueError, TypeError):
+        return default
 
 # ── サイドバー：各種CSVデータの選択と制約パラメータ ──
 with st.sidebar:
@@ -128,10 +137,7 @@ else:
                                         for col in df_shift.columns:
                                             if '人員' in col or '人数' in col or 'スタッフ' in col:
                                                 val_raw = s_row.get(col, 1)
-                                                try:
-                                                    minus_count = int(float(str(val_raw).strip()))
-                                                except:
-                                                    minus_count = 1
+                                                minus_count = safe_int(val_raw, 1)
                                                 break
                                         shift_staff_reduction[d_val] = shift_staff_reduction.get(d_val, 0) + minus_count
                             except Exception as e:
@@ -221,7 +227,7 @@ else:
                             except:
                                 due_date = datetime.today() + timedelta(days=10)
                             
-                            sorted_rows = sorted(rows, key=lambda x: x.get("順", 1))
+                            sorted_rows = sorted(rows, key=lambda x: safe_int(x.get("順"), 1))
                             
                             current_assign_date = datetime.combine(start_base_date, datetime.min.time())
                             current_slot = "AM"
@@ -232,10 +238,13 @@ else:
                             order_first_start_date = None
                             order_last_end_date = None
                             
+                            # ★同一受注内で既に割り当てた時間帯（日付, 時間帯）を記録するセット
+                            order_used_slots = set()
+                            
                             for row in sorted_rows:
-                                seq = row.get("順", 1)
+                                seq = safe_int(row.get("順"), 1)
                                 process = str(row.get("工程", ""))
-                                staff_needed = int(row.get("人数", 1))
+                                staff_needed = safe_int(row.get("人数"), 1)
                                 
                                 record_id = str(row.get(id_col_name, "")) if id_col_name else ""
                                 
@@ -248,6 +257,7 @@ else:
                                 
                                 while True:
                                     d_str = target_date.strftime("%Y-%m-%d")
+                                    slot_key = (d_str, target_slot)
                                     
                                     reduction = shift_staff_reduction.get(d_str, 0)
                                     effective_staff = max(1, base_staff - reduction)
@@ -269,8 +279,10 @@ else:
                                     is_ng = is_process_ng(d_str, target_slot, process)
                                     slot_data = daily_slot_pool[d_str][target_slot]
                                     
-                                    if not is_ng and (slot_data["used"] + task_man_hours <= slot_data["max"]):
+                                    # ★「NGでないこと」「同一受注がこの時間帯をまだ使用していないこと」「容量内であること」をチェック
+                                    if not is_ng and slot_key not in order_used_slots and (slot_data["used"] + task_man_hours <= slot_data["max"]):
                                         slot_data["used"] += task_man_hours
+                                        order_used_slots.add(slot_key) # 使用済みスロットとして登録
                                         break
                                     else:
                                         if target_slot == "AM":
@@ -338,7 +350,7 @@ else:
                         df_schedule_out = df_schedule_out.sort_values(by=["割当作業日", "時間帯", "受注番号", "順番"])
                         st.dataframe(df_schedule_out, use_container_width=True)
                         
-                        # ── @pocket書き戻し用CSVのダウンロード（日付選択 ＆ 完了ステータス指定） ──
+                        # ── @pocket書き戻し用CSVのダウンロード（バイトエンコード方式） ──
                         st.markdown("---")
                         st.subheader("📥 @pocket書き戻し用データのダウンロード")
                         st.markdown("指定した作業日の完了分を絞り込み、完了ステータスを **「完了」**（未了の場合は **空欄**）にして@pocket書き戻し用CSVをダウンロードできます。")
@@ -358,23 +370,23 @@ else:
                         if selected_writeback_date != "すべて（全期間）":
                             df_pocket_export = df_pocket_export[df_pocket_export["割当作業日"] == selected_writeback_date]
                         
-                        # ステータス設定（完了 = 「完了」、未了 = 空欄）
+                        # ステータス設定
                         if status_choice == "完了":
                             df_pocket_export["完了ステータス"] = "完了"
                         else:
-                            df_pocket_export["完了ステータス"] = "" # @pocketの仕様に合わせた空欄
+                            df_pocket_export["完了ステータス"] = ""
                         
-                        # 列の並び順調整（受注番号, 工程, 割当作業日, 時間帯, 完了ステータス, 明細レコードID）
                         df_pocket_export = df_pocket_export[[
                             "受注番号", "工程", "割当作業日", "時間帯", "完了ステータス", "明細レコードID"
                         ]]
                         
-                        csv_data = df_pocket_export.to_csv(index=False, encoding='cp932')
+                        csv_text = df_pocket_export.to_csv(index=False)
+                        csv_bytes = csv_text.encode('cp932', errors='replace')
                         
                         target_label_text = f"【{selected_writeback_date}分】" if selected_writeback_date != "すべて（全期間）" else "【全期間】"
                         st.download_button(
                             label=f"📥 @pocket書き戻し用CSVをダウンロードする {target_label_text}",
-                            data=csv_data,
+                            data=csv_bytes,
                             file_name=f"pocket_writeback_{datetime.today().strftime('%Y%m%d')}.csv",
                             mime="text/css" if False else "text/csv"
                         )
