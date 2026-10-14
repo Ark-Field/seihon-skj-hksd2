@@ -11,9 +11,9 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（機器台数マスタ対応版）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（機械ファースト配置版）", layout="wide")
 
-st.title("📦 製本管理業務 - 機器稼働優先 ＆ 機器台数マスタ管理システム")
+st.title("📦 製本管理業務 - 機械作業優先配置 ＆ 機器台数マスタ管理システム")
 
 # ── 安全な整数変換ヘルパー関数 ──
 def safe_int(val, default=1):
@@ -79,7 +79,6 @@ else:
         
         df_order.columns = df_order.columns.str.strip()
         
-        # 工程が空欄・空白・NaNの行を自動除外
         if '工程' in df_order.columns:
             df_order = df_order.dropna(subset=['工程'])
             df_order = df_order[df_order['工程'].astype(str).str.strip() != '']
@@ -88,7 +87,6 @@ else:
         if df_order.empty:
             st.error("有効なプログラムデータが存在する行が見つかりませんでした。")
         else:
-            # 明細レコードIDの列を自動検出
             id_col_name = None
             for col in df_order.columns:
                 if '明細レコードID' in col or 'レコードID' in col or ('id' in col.lower() and '明細' in col):
@@ -149,7 +147,7 @@ else:
                         st.warning(f"作業区分マスタの読み込みに失敗しました: {me}")
 
                 # ── 3. 機器台数マスタの読み込み ──
-                machine_capacity_dict = {} # 作業区分ごとの保有台数
+                machine_capacity_dict = {}
                 if f_machine_count is not None:
                     try:
                         mc_bytes = f_machine_count.read()
@@ -220,7 +218,7 @@ else:
                 df_target = edited_df[edited_df["除外する"] == False].copy()
 
                 # 計算実行ボタン
-                if st.button("🚀 手直し内容を反映してスケジュールを計算する", type="primary"):
+                if st.button("🚀 機械ファースト配置によるスケジュール計算を実行する", type="primary"):
                     if df_target.empty:
                         st.error("すべての工程行が除外されています。")
                         st.session_state.calculated = False
@@ -287,7 +285,7 @@ else:
                                         ng_schedule_rules[d_val] = []
                                     ng_schedule_rules[d_val].append({"process": p_val, "time_period": t_val})
                             except Exception as g_err:
-                                st.warning(f"CSV③の読み込みに失敗しましたが続行します: {g_err}")
+                                st.warning(f"CSV③の読み込みに失敗しましたが続行します: g_err")
 
                         # ── 6. 納品が早い順に受注を並べ替え ──
                         order_due_sort = df_target.groupby('受注番号')['納期'].min().reset_index()
@@ -315,11 +313,140 @@ else:
                                     return True
                             return False
 
-                        # スケジュール計算メインループ（機器台数マスタを考慮した排他制御）
+                        # ── 7. 2段階スケジューリングロジックの実行 ──
+                        # フェーズ1：すべての受注の「機械作業工程」を先に抽出してスケジュールに配置する
+                        # フェーズ2：残りの「非機械・軽作業工程」をその合間に配置する
+                        
+                        # まず全受注の全工程を行辞書のリストとして保持しつつ、順（順番）でソートしておく
+                        order_tasks_map = {}
                         for order_id in sorted_order_ids:
                             group = df_target[df_target['受注番号'] == order_id]
                             rows = group.to_dict('records')
+                            sorted_rows = sorted(rows, key=lambda x: safe_int(x.get("順", x.get("順番", 1)), 1))
+                            order_tasks_map[order_id] = sorted_rows
+
+                        # 各受注ごとの最終完了日と進捗管理用
+                        order_last_end = {}
+                        order_last_slot = {}
+                        order_assigned_slots = {} # 受注ごとに使用済みの (date, slot) を記録して重複割り当てを防ぐ
+
+                        for order_id in sorted_order_ids:
+                            order_assigned_slots[order_id] = set()
+                            # 初期起算位置
+                            order_last_end[order_id] = datetime.combine(start_base_date, datetime.min.time())
+                            order_last_slot[order_id] = "AM"
+
+                        # ヘルパー関数：単一タスクを指定された順序と制約を守りつつスロットに配置する関数
+                        def allocate_task(order_id, row, is_machine_phase):
+                            seq = safe_int(row.get("順", row.get("順番", 1)), 1)
+                            process = str(row.get("工程", ""))
+                            work_div = str(row.get("作業区分", "作業区分該当なし"))
+                            staff_needed = safe_int(row.get("人員", 1), 1)
+                            leader = str(row.get("リーダー", "-"))
+                            record_id = str(row.get(id_col_name, "")) if id_col_name else ""
                             
+                            duration_minutes = float(row.get("所要分", row.get("所要時間", 120)))
+                            task_hours = duration_minutes / 60.0
+                            task_man_hours = staff_needed * task_hours
+                            
+                            is_machine_work = any(kw in work_div for kw in ["機械", "機", "A", "B", "C"]) and not any(kw in work_div for kw in ["デスク", "外注", "エリア", "手作業", "該当なし"])
+                            
+                            # 機械フェーズでは非機械タスクはスキップ、非機械フェーズでは機械タスクはスキップ
+                            if is_machine_phase and not is_machine_work:
+                                return False
+                            if not is_machine_phase and is_machine_work:
+                                return False
+
+                            max_machine_limit = machine_capacity_dict.get(work_div, 1) if is_machine_work else 999
+                            
+                            target_date = order_last_end[order_id]
+                            target_slot = order_last_slot[order_id]
+                            
+                            while True:
+                                d_str = target_date.strftime("%Y-%m-%d")
+                                slot_key = (d_str, target_slot)
+                                
+                                reduction = shift_staff_reduction.get(d_str, 0)
+                                effective_staff = max(1, base_staff - reduction)
+                                
+                                am_capacity = effective_staff * am_hours
+                                pm_capacity = effective_staff * pm_hours
+                                
+                                if d_str not in daily_slot_pool:
+                                    daily_slot_pool[d_str] = {
+                                        "reduction": reduction,
+                                        "effective_staff": effective_staff,
+                                        "AM": {"used": 0.0, "max": am_capacity, "machine_counts": {}},
+                                        "PM": {"used": 0.0, "max": pm_capacity, "machine_counts": {}}
+                                    }
+                                else:
+                                    daily_slot_pool[d_str]["AM"]["max"] = am_capacity
+                                    daily_slot_pool[d_str]["PM"]["max"] = pm_capacity
+                                    if "machine_counts" not in daily_slot_pool[d_str]["AM"]:
+                                        daily_slot_pool[d_str]["AM"]["machine_counts"] = {}
+                                    if "machine_counts" not in daily_slot_pool[d_str]["PM"]:
+                                        daily_slot_pool[d_str]["PM"]["machine_counts"] = {}
+                                
+                                is_ng = is_process_ng(d_str, target_slot, process, work_div)
+                                slot_data = daily_slot_pool[d_str][target_slot]
+                                
+                                current_machine_booked = slot_data["machine_counts"].get(work_div, 0)
+                                machine_limit_exceeded = is_machine_work and (current_machine_booked >= max_machine_limit)
+                                
+                                if not is_ng and slot_key not in order_assigned_slots[order_id] and not machine_limit_exceeded and (slot_data["used"] + task_man_hours <= slot_data["max"]):
+                                    slot_data["used"] += task_man_hours
+                                    if is_machine_work:
+                                        slot_data["machine_counts"][work_div] = current_machine_booked + 1
+                                    order_assigned_slots[order_id].add(slot_key)
+                                    
+                                    # 次の工程の開始位置を更新（直列順序の維持）
+                                    order_last_end[order_id] = target_date
+                                    order_last_slot[order_id] = target_slot
+                                    
+                                    assigned_slot_name = "AM (8:30〜12:00)" if target_slot == "AM" else "PM (13:00〜17:30)"
+                                    
+                                    # 顧客名・品名の取得
+                                    customer = str(row.get("得意先", row.get("顧客名", "")))
+                                    item_name = str(row.get("書名1", row.get("品名", "")))
+                                    due_date_str = str(row.get("納期", ""))
+                                    
+                                    scheduled_results.append({
+                                        "割当作業日": d_str,
+                                        "時間帯": assigned_slot_name,
+                                        "納期": due_date_str,
+                                        "受注番号": order_id,
+                                        "順": seq,
+                                        "品名": item_name,
+                                        "顧客名": customer,
+                                        "工程": process,
+                                        "作業区分": work_div,
+                                        "必要人員": f"{staff_needed}人",
+                                        "所要時間": f"{task_hours:.1f}h ({duration_minutes:.0f}分)",
+                                        "リーダー": leader,
+                                        "明細レコードID": record_id
+                                    })
+                                    return True
+                                else:
+                                    if target_slot == "AM":
+                                        target_slot = "PM"
+                                    else:
+                                        target_date = target_date + timedelta(days=1)
+                                        target_slot = "AM"
+
+                        # フェーズ1：機械作業工程の優先配置
+                        for order_id in sorted_order_ids:
+                            for row in order_tasks_map[order_id]:
+                                allocate_task(order_id, row, is_machine_phase=True)
+
+                        # フェーズ2：残りの非機械・軽作業工程の隙間埋め配置
+                        for order_id in sorted_order_ids:
+                            for row in order_tasks_map[order_id]:
+                                allocate_task(order_id, row, is_machine_phase=False)
+
+                        # 受注ごとの納期完了日サマリー作成
+                        for order_id in sorted_order_ids:
+                            group = df_target[df_target['受注番号'] == order_id]
+                            rows = group.to_dict('records')
                             customer = str(rows[0].get("得意先", rows[0].get("顧客名", "")))
                             item_name = str(rows[0].get("書名1", rows[0].get("品名", "")))
                             due_date_str = str(rows[0].get("納期", ""))
@@ -328,113 +455,13 @@ else:
                                 due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
                             except:
                                 due_date = datetime.today() + timedelta(days=10)
-                            
-                            sorted_rows = sorted(rows, key=lambda x: safe_int(x.get("順", x.get("順番", 1)), 1))
-                            
-                            current_assign_date = datetime.combine(start_base_date, datetime.min.time())
-                            current_slot = "AM"
-                            
-                            last_task_end_date = current_assign_date
-                            last_task_end_slot = current_slot
-                            
-                            order_first_start_date = None
-                            order_last_end_date = None
-                            order_used_slots = set()
-                            
-                            for row in sorted_rows:
-                                seq = safe_int(row.get("順", row.get("順番", 1)), 1)
-                                process = str(row.get("工程", ""))
-                                work_div = str(row.get("作業区分", "作業区分該当なし"))
-                                staff_needed = safe_int(row.get("人員", 1), 1)
-                                leader = str(row.get("リーダー", "-"))
-                                record_id = str(row.get(id_col_name, "")) if id_col_name else ""
                                 
-                                duration_minutes = float(row.get("所要分", row.get("所要時間", 120)))
-                                task_hours = duration_minutes / 60.0
-                                task_man_hours = staff_needed * task_hours
-                                
-                                # 機械かどうかの判定
-                                is_machine_work = any(kw in work_div for kw in ["機械", "機", "A", "B", "C"]) and not any(kw in work_div for kw in ["デスク", "外注", "エリア", "手作業", "該当なし"])
-                                
-                                # 機器台数マスタから許容台数を取得（未登録ならデフォルト1台）
-                                max_machine_limit = machine_capacity_dict.get(work_div, 1) if is_machine_work else 999
-                                
-                                target_date = last_task_end_date
-                                target_slot = last_task_end_slot
-                                
-                                while True:
-                                    d_str = target_date.strftime("%Y-%m-%d")
-                                    slot_key = (d_str, target_slot)
-                                    
-                                    reduction = shift_staff_reduction.get(d_str, 0)
-                                    effective_staff = max(1, base_staff - reduction)
-                                    
-                                    am_capacity = effective_staff * am_hours
-                                    pm_capacity = effective_staff * pm_hours
-                                    
-                                    if d_str not in daily_slot_pool:
-                                        daily_slot_pool[d_str] = {
-                                            "reduction": reduction,
-                                            "effective_staff": effective_staff,
-                                            "AM": {"used": 0.0, "max": am_capacity, "machine_counts": {}},
-                                            "PM": {"used": 0.0, "max": pm_capacity, "machine_counts": {}}
-                                        }
-                                    else:
-                                        daily_slot_pool[d_str]["AM"]["max"] = am_capacity
-                                        daily_slot_pool[d_str]["PM"]["max"] = pm_capacity
-                                        if "machine_counts" not in daily_slot_pool[d_str]["AM"]:
-                                            daily_slot_pool[d_str]["AM"]["machine_counts"] = {}
-                                        if "machine_counts" not in daily_slot_pool[d_str]["PM"]:
-                                            daily_slot_pool[d_str]["PM"]["machine_counts"] = {}
-                                    
-                                    is_ng = is_process_ng(d_str, target_slot, process, work_div)
-                                    slot_data = daily_slot_pool[d_str][target_slot]
-                                    
-                                    # 現在そのスロットでその機械が何台使われているか
-                                    current_machine_booked = slot_data["machine_counts"].get(work_div, 0)
-                                    machine_limit_exceeded = is_machine_work and (current_machine_booked >= max_machine_limit)
-                                    
-                                    if not is_ng and slot_key not in order_used_slots and not machine_limit_exceeded and (slot_data["used"] + task_man_hours <= slot_data["max"]):
-                                        slot_data["used"] += task_man_hours
-                                        if is_machine_work:
-                                            slot_data["machine_counts"][work_div] = current_machine_booked + 1
-                                        order_used_slots.add(slot_key)
-                                        break
-                                    else:
-                                        if target_slot == "AM":
-                                            target_slot = "PM"
-                                        else:
-                                            target_date = target_date + timedelta(days=1)
-                                            target_slot = "AM"
-                                
-                                d_str = target_date.strftime("%Y-%m-%d")
-                                assigned_slot_name = "AM (8:30〜12:00)" if target_slot == "AM" else "PM (13:00〜17:30)"
-                                
-                                if order_first_start_date is None:
-                                    order_first_start_date = target_date
-                                order_last_end_date = target_date
-                                
-                                scheduled_results.append({
-                                    "割当作業日": d_str,
-                                    "時間帯": assigned_slot_name,
-                                    "納期": due_date_str,
-                                    "受注番号": order_id,
-                                    "品名": item_name,
-                                    "顧客名": customer,
-                                    "工程": process,
-                                    "作業区分": work_div,
-                                    "必要人員": f"{staff_needed}人",
-                                    "所要時間": f"{task_hours:.1f}h ({duration_minutes:.0f}分)",
-                                    "リーダー": leader,
-                                    "明細レコードID": record_id
-                                })
-                                
-                                last_task_end_date = target_date
-                                last_task_end_slot = target_slot
-
-                            if order_last_end_date:
-                                planned_completion_str = order_last_end_date.strftime("%Y-%m-%d")
-                                diff_days = (due_date - order_last_end_date).days
+                            # この受注で割り当てられた結果から最大の作業日を取得
+                            match_res = [r for r in scheduled_results if r["受注番号"] == order_id]
+                            if match_res:
+                                max_date_str = max(r["割当作業日"] for r in match_res)
+                                planned_end_date = datetime.strptime(max_date_str, "%Y-%m-%d")
+                                diff_days = (due_date - planned_end_date).days
                                 
                                 if diff_days > 0:
                                     timing_status = f"納期より {diff_days} 日前に完成"
@@ -448,21 +475,21 @@ else:
                                     "顧客名": customer,
                                     "品名": item_name,
                                     "納期": due_date_str,
-                                    "納期完了日": planned_completion_str,
+                                    "納期完了日": max_date_str,
                                     "完了タイミング": timing_status,
                                     "余裕日数": f"{diff_days}日"
                                 })
 
                         # セッションに保存
-                        st.session_state.df_schedule_out = pd.DataFrame(scheduled_results).sort_values(by=["割当作業日", "時間帯", "受注番号"])
+                        st.session_state.df_schedule_out = pd.DataFrame(scheduled_results).sort_values(by=["割当作業日", "時間帯", "受注番号", "順"])
                         st.session_state.df_order_summary = pd.DataFrame(order_summary_list)
                         st.session_state.daily_slot_pool = daily_slot_pool
                         st.session_state.shift_dates = shift_dates
                         st.session_state.ng_schedule_rules = ng_schedule_rules
                         st.session_state.calculated = True
-                        st.success("機器台数マスタを反映したスケジュール計算が完了しました！")
+                        st.success("機械ファースト配置によるスケジュール計算が完了しました！")
 
-                # ── 計算済みデータの表示・出力セクション（セッション保持） ──
+                # ── 計算済みデータの表示・出力セクション ──
                 if st.session_state.calculated and st.session_state.df_schedule_out is not None:
                     
                     st.markdown("---")
