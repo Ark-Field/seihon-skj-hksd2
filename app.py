@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import os
+import urllib.request
 from datetime import datetime, timedelta
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -11,7 +12,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（NotoSansJP対応版）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（日本語PDF対応版）", layout="wide")
 
 st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し・スケジュール管理システム")
 
@@ -24,13 +25,22 @@ def safe_int(val, default=1):
     except (ValueError, TypeError):
         return default
 
-# ── 日本語フォント（NotoSansJP-Regular.ttf）の登録処理 ──
-font_registered = False
-font_path = os.path.join(os.path.dirname(__file__), "NotoSansJP-Regular.ttf")
-if os.path.exists(font_path):
+# ── 日本語フォント（NotoSansJP）の自動取得・登録処理 ──
+font_name = 'Helvetica' # フォールバック
+font_filename = "NotoSansJP-Regular.ttf"
+
+if not os.path.exists(font_filename):
     try:
-        pdfmetrics.registerFont(TTFont('NotoSansJP', font_path))
-        font_registered = True
+        # パブリックなCDN等から日本語対応フォントを自動ダウンロード
+        font_url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+        urllib.request.urlretrieve(font_url, font_filename)
+    except Exception as e:
+        print(f"Font download error: {e}")
+
+if os.path.exists(font_filename):
+    try:
+        pdfmetrics.registerFont(TTFont('JapFont', font_filename))
+        font_name = 'JapFont'
     except Exception as e:
         print(f"Font registration error: {e}")
 
@@ -384,9 +394,6 @@ else:
                     st.markdown("---")
                     st.subheader("📄 日別スケジュール PDFダウンロード")
                     
-                    if not font_registered:
-                        st.warning("⚠️ サーバー上に `NotoSansJP-Regular.ttf` が見つからないため、PDF内の日本語が正しく表示されない可能性があります。リポジトリにフォントファイルを配置してください。")
-                    
                     df_schedule_out = st.session_state.df_schedule_out
                     available_dates_pdf = sorted(df_schedule_out["割当作業日"].unique().tolist())
                     
@@ -401,8 +408,6 @@ else:
                             story = []
                             
                             styles = getSampleStyleSheet()
-                            font_name = 'NotoSansJP' if font_registered else 'Helvetica'
-                            
                             title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName=font_name, fontSize=16, leading=20, textColor=colors.HexColor('#1f1f1f'))
                             normal_style = ParagraphStyle('NormalStyle', parent=styles['Normal'], fontName=font_name, fontSize=9, leading=12)
                             bold_style = ParagraphStyle('BoldStyle', parent=styles['Normal'], fontName=font_name, fontSize=9, leading=12)
@@ -472,7 +477,7 @@ else:
                     csv_text = df_pocket_export.to_csv(index=False)
                     csv_bytes = csv_text.encode('cp932', errors='replace')
                     
-                    target_label_text = f"【{selected_writeback_date}분】" if selected_writeback_date != "すべて（全期間）" else "【全期間】"
+                    target_label_text = f"【{selected_writeback_date}分】" if selected_writeback_date != "すべて（全期間）" else "【全期間】"
                     st.download_button(
                         label=f"📥 @pocket書き戻し用CSVをダウンロードする {target_label_text}",
                         data=csv_bytes,
@@ -498,7 +503,6 @@ else:
                         pm_max = s_info["PM"]["max"]
                         
                         total_max = am_max + pm_max
-                        total_used = am_used + pm_max # wait, am_used + pm_used
                         total_used = am_used + pm_used
                         overtime_hours = max(0.0, total_used - total_max)
                         
