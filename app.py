@@ -11,9 +11,9 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（現場最適化版）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（マスタ自動化・手直し対応版）", layout="wide")
 
-st.title("📦 製本管理業務 - 機器稼働優先 ＆ 人員管理システム")
+st.title("📦 製本管理業務 - 機器稼働優先 ＆ 作業区分自動化システム")
 
 # ── 安全な整数変換ヘルパー関数 ──
 def safe_int(val, default=1):
@@ -53,6 +53,7 @@ if "ng_schedule_rules" not in st.session_state:
 with st.sidebar:
     st.header("1. 各種CSVデータの選択")
     f1 = st.file_uploader("CSV① 受注データ（必須）", type=["csv"])
+    f_master = st.file_uploader("CSV④ 作業区分マスタ（任意: 工程,作業区分）", type=["csv"])
     f2 = st.file_uploader("CSV② 休暇シフトデータ（任意）", type=["csv"])
     f3 = st.file_uploader("CSV③ 機械稼働NGデータ（任意）", type=["csv"])
     
@@ -109,8 +110,6 @@ else:
                         continue
                 return s
 
-            # カラム名のマッピング・補正（必須項目の確認）
-            # 期待するカラム: 納期, 品名（または書名1）, 顧客名（または得意先）, 工程, 作業区分, 人員, 所要分, リーダー
             if '納期日付' in df_order.columns and '納期' not in df_order.columns:
                 df_order['納期'] = df_order['納期日付']
             if '納期' in df_order.columns:
@@ -125,8 +124,59 @@ else:
             if df_order_valid.empty:
                 st.warning("起算日以降の納期を持つ受注データが見つかりませんでした。")
             else:
+                # ── 2. 作業区分マスタの読み込みと自動割り当て ──
+                master_dict = {}
+                if f_master is not None:
+                    try:
+                        m_bytes = f_master.read()
+                        try:
+                            df_m = pd.read_csv(io.StringIO(m_bytes.decode('utf-8')))
+                        except UnicodeDecodeError:
+                            df_m = pd.read_csv(io.StringIO(m_bytes.decode('cp932', errors='ignore')))
+                        df_m.columns = df_m.columns.str.strip()
+                        # '工程' と '作業区分' の列を探す
+                        m_proc_col, m_div_col = None, None
+                        for c in df_m.columns:
+                            if '工程' in c: m_proc_col = c
+                            if '区分' in c or '作業区分' in c: m_div_col = c
+                        if m_proc_col and m_div_col:
+                            for _, m_row in df_m.iterrows():
+                                p_name = str(m_row[m_proc_col]).strip()
+                                d_name = str(m_row[m_div_col]).strip()
+                                master_dict[p_name] = d_name
+                    except Exception as me:
+                        st.warning(f"作業区分マスタの読み込みに失敗しました: {me}")
+
+                # 作業区分カラムがない、または空の場合に自動補完
+                if '作業区分' not in df_order_valid.columns:
+                    df_order_valid['作業区分'] = ""
+
+                def auto_assign_div(row):
+                    current_div = str(row.get('作業区分', '')).strip()
+                    if current_div and current_div.lower() != 'nan':
+                        return current_div
+                    proc = str(row.get('工程', '')).strip()
+                    # 1. マスタにあれば適用
+                    if proc in master_dict:
+                        return master_dict[proc]
+                    # 2. キーワード自動判定フォールバック
+                    if any(k in proc for k in ['綴じ', '無線', '中綴じ']):
+                        return '機械A'
+                    elif any(k in proc for k in ['断裁', '裁断', '三方']):
+                        return '機械B'
+                    elif any(k in proc for k in ['折', '折り']):
+                        return '機械C'
+                    elif any(k in proc for k in ['梱包', '検品', '箱']):
+                        return 'デスク'
+                    else:
+                        return 'エリア2FA'
+
+                df_order_valid['作業区分'] = df_order_valid.apply(auto_assign_div, axis=1)
+
                 st.markdown("---")
-                st.subheader("📋 個別「工程行」除外エディタ（除外したい特定の工程にチェック）")
+                st.subheader("📋 工程別データ確認 ＆ 作業区分の手直しエディタ")
+                st.markdown("💡 マスタやキーワードから自動判定された**「作業区分」**や除外したい行を確認・手動で直接書き換えてから計算を行えます。")
+
                 df_editor_view = df_order_valid.copy()
                 df_editor_view.insert(0, "除外する", False)
 
@@ -134,6 +184,7 @@ else:
                     df_editor_view,
                     column_config={
                         "除外する": st.column_config.CheckboxColumn("除外する", default=False),
+                        "作業区分": st.column_config.TextColumn("作業区分（手動修正可能）"),
                     },
                     hide_index=True,
                     use_container_width=True
@@ -142,12 +193,12 @@ else:
                 df_target = edited_df[edited_df["除外する"] == False].copy()
 
                 # 計算実行ボタン
-                if st.button("🚀 選択した内容を反映してスケジュールを計算する", type="primary"):
+                if st.button("🚀 手直し内容を反映してスケジュールを計算する", type="primary"):
                     if df_target.empty:
                         st.error("すべての工程行が除外されています。")
                         st.session_state.calculated = False
                     else:
-                        # ── 2. CSV② 休暇シフトデータの読み込み ──
+                        # ── 3. CSV② 休暇シフトデータの読み込み ──
                         shift_staff_reduction = {}
                         shift_dates = set()
                         
@@ -178,7 +229,7 @@ else:
                             except Exception as e:
                                 st.warning(f"CSV②の読み込みに失敗しましたが続行します: {e}")
 
-                        # ── 3. CSV③ 機械稼働NGデータの読み込み ──
+                        # ── 4. CSV③ 機械稼働NGデータの読み込み ──
                         ng_schedule_rules = {}
                         if f3 is not None:
                             try:
@@ -211,7 +262,7 @@ else:
                             except Exception as g_err:
                                 st.warning(f"CSV③の読み込みに失敗しましたが続行します: {g_err}")
 
-                        # ── 4. 納品が早い順に受注を並べ替え ──
+                        # ── 5. 納品が早い順に受注を並べ替え ──
                         order_due_sort = df_target.groupby('受注番号')['納期'].min().reset_index()
                         order_due_sort = order_due_sort.sort_values(by=['納期', '受注番号'], ascending=[True, True])
                         sorted_order_ids = order_due_sort['受注番号'].tolist()
@@ -266,7 +317,7 @@ else:
                             for row in sorted_rows:
                                 seq = safe_int(row.get("順", row.get("順番", 1)), 1)
                                 process = str(row.get("工程", ""))
-                                work_div = str(row.get("作業区分", "その他")) # 機械名、エリア、デスクなど
+                                work_div = str(row.get("作業区分", "エリア2FA")) # 手直しされた最新の作業区分を使用
                                 staff_needed = safe_int(row.get("人員", 1), 1)
                                 leader = str(row.get("リーダー", "-"))
                                 record_id = str(row.get(id_col_name, "")) if id_col_name else ""
@@ -275,7 +326,7 @@ else:
                                 task_hours = duration_minutes / 60.0
                                 task_man_hours = staff_needed * task_hours
                                 
-                                # 機械かどうかの判定（作業区分に「機械」やアルファベット等が含まれる、または専用の機械名）
+                                # 機械かどうかの判定（作業区分に「機械」や「機械A/B/C」などが含まれる場合を排他制御対象とする）
                                 is_machine_work = any(kw in work_div for kw in ["機械", "機", "A", "B", "C"]) and not any(kw in work_div for kw in ["デスク", "外注", "エリア", "手作業"])
                                 
                                 target_date = last_task_end_date
@@ -309,11 +360,6 @@ else:
                                     is_ng = is_process_ng(d_str, target_slot, process, work_div)
                                     slot_data = daily_slot_pool[d_str][target_slot]
                                     
-                                    # 排他制御チェック：
-                                    # 1. NG日でないこと
-                                    # 2. この受注でこのスロットをすでに使っていないこと
-                                    # 3. マンパワーが上限以内であること
-                                    # 4. 機械作業の場合、その機械（work_div）が同スロットで他の受注に占有されていないこと
                                     machine_conflict = is_machine_work and (work_div in slot_data["machines_used"])
                                     
                                     if not is_ng and slot_key not in order_used_slots and not machine_conflict and (slot_data["used"] + task_man_hours <= slot_data["max"]):
@@ -382,7 +428,7 @@ else:
                         st.session_state.shift_dates = shift_dates
                         st.session_state.ng_schedule_rules = ng_schedule_rules
                         st.session_state.calculated = True
-                        st.success("スケジュール計算が完了しました（機械排他制御 ＆ 納期完了日反映）！")
+                        st.success("スケジュール計算が完了しました！")
 
                 # ── 計算済みデータの表示・出力セクション（セッション保持） ──
                 if st.session_state.calculated and st.session_state.df_schedule_out is not None:
@@ -475,7 +521,7 @@ else:
                     if selected_writeback_date != "すべて（全期間）":
                         df_pocket_export = df_pocket_export[df_pocket_export["割当作業日"] == selected_writeback_date]
                     
-                    df_pocket_export["完了ステータス"] = "完了" if status_choice == "完了" else ""
+                    df_pocket_export["完了ステータs"] = "完了" if status_choice == "完了" else ""
                     
                     df_pocket_export = df_pocket_export[[
                         "受注番号", "工程", "割当作業日", "時間帯", "完了ステータス", "明細レコードID"
