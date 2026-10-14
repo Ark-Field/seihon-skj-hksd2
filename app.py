@@ -3,17 +3,10 @@ import pandas as pd
 import io
 from datetime import datetime, timedelta
 
-# WeasyPrintによるPDF生成用
-try:
-    import weasyprint
-    WEASYPRINT_AVAILABLE = True
-except ImportError:
-    WEASYPRINT_AVAILABLE = False
-
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（PDF出力対応版）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（スケジュール管理システム）", layout="wide")
 
-st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し・日別PDF出力システム")
+st.title("📦 製本管理業務 個別工程除外 ＆ @pocket書き戻し・日別スケジュール出力システム")
 
 # ── 安全な整数変換ヘルパー関数 ──
 def safe_int(val, default=1):
@@ -348,89 +341,61 @@ else:
                         df_schedule_out = df_schedule_out.sort_values(by=["割当作業日", "時間帯", "受注番号", "順番"])
                         st.dataframe(df_schedule_out, use_container_width=True)
                         
-                        # ── 新機能：日別スケジュールPDFダウンロードセクション ──
+                        # ── 新機能：日別スケジュール印刷・PDF保存プレビュー ──
                         st.markdown("---")
-                        st.subheader("📄 日別スケジュール印刷用 PDFダウンロード")
-                        st.markdown("特定の日付の作業スケジュールを、現場掲示や確認用に綺麗なPDFレイアウトでダウンロードできます。")
+                        st.subheader("🖨️ 日別スケジュール 印刷・PDF保存ビュー")
+                        st.markdown("特定の日付を選んで「プレビュー表示」を行うと、そのままブラウザから印刷やPDF保存ができるレイアウトが表示されます。")
                         
                         available_dates_pdf = sorted(df_schedule_out["割当作業日"].unique().tolist())
                         if available_dates_pdf:
-                            col_p1, col_p2 = st.columns([2, 1])
-                            with col_p1:
-                                selected_pdf_date = st.selectbox("PDF出力する作業日を選択", available_dates_pdf, key="pdf_date_select")
-                            with col_p2:
-                                st.markdown("<br>", unsafe_allow_html=True)
-                                if WEASYPRINT_AVAILABLE:
-                                    # 該当日のデータを抽出
-                                    df_day_target = df_schedule_out[df_schedule_out["割当作業日"] == selected_pdf_date]
-                                    
-                                    # HTML構築
-                                    html_pdf_content = f"""
-                                    <html>
-                                    <head>
-                                        <meta charset="utf-8">
-                                        <style>
-                                            @page {{ size: A4 landscape; margin: 15mm; }}
-                                            body {{ font-family: sans-serif; color: #333; font-size: 11pt; }}
-                                            h1 {{ font-size: 18pt; border-bottom: 2px solid #333; padding-bottom: 5px; margin-bottom: 10px; }}
-                                            .meta {{ margin-bottom: 15px; font-weight: bold; }}
-                                            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-                                            th, td {{ border: 1px solid #bbb; padding: 8px 10px; text-align: left; font-size: 10pt; }}
-                                            th {{ background-color: #f0f0f0; }}
-                                            .center {{ text-align: center; }}
-                                        </style>
-                                    </head>
-                                    <body>
-                                        <h1>製本管理システム - 日別作業スケジュール</h1>
-                                        <div class="meta">対象作業日: {selected_pdf_date} （出力日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}）</div>
-                                        <table>
-                                            <thead>
-                                                <tr>
-                                                    <th style="width: 15%;">時間帯</th>
-                                                    <th style="width: 10%;">受注番号</th>
-                                                    <th style="width: 20%;">案件名（品名）</th>
-                                                    <th style="width: 15%;">顧客名</th>
-                                                    <th style="width: 15%;">工程</th>
-                                                    <th style="width: 10%;">作業時間</th>
-                                                    <th style="width: 15%;">納期</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                    """
-                                    
-                                    for _, d_row in df_day_target.iterrows():
-                                        html_pdf_content += f"""
-                                                <tr>
-                                                    <td>{d_row['時間帯']}</td>
-                                                    <td>{d_row['受注番号']}</td>
-                                                    <td>{d_row['案件名']}</td>
-                                                    <td>{d_row['顧客名']}</td>
-                                                    <td><b>{d_row['工程']}</b></td>
-                                                    <td>{d_row['作業時間']}</td>
-                                                    <td>{d_row['納期']}</td>
-                                                </tr>
-                                        """
-                                        
-                                    html_pdf_content += """
-                                            </tbody>
-                                        </table>
-                                    </body>
-                                    </html>
-                                    """
-                                    
-                                    try:
-                                        pdf_data = weasyprint.HTML(string=html_pdf_content).write_pdf()
-                                        st.download_button(
-                                            label=f"📥 {selected_pdf_date} のスケジュールPDFをダウンロード",
-                                            data=pdf_data,
-                                            file_name=f"schedule_{selected_pdf_date}.pdf",
-                                            mime="application/pdf",
-                                            type="primary"
-                                        )
-                                    except Exception as pdf_err:
-                                        st.error(f"PDF生成中にエラーが発生しました: {pdf_err}")
-                                else:
-                                    st.warning("PDF生成ライブラリ(WeasyPrint)が利用できません。")
+                            selected_print_date = st.selectbox("プレビュー・印刷する作業日を選択", available_dates_pdf, key="print_date_select")
+                            
+                            df_day_target = df_schedule_out[df_schedule_out["割当作業日"] == selected_print_date]
+                            
+                            # プレビュー用の綺麗なHTMLカードを作成
+                            print_html = f"""
+                            <div style="border: 2px solid #333; padding: 20px; border-radius: 8px; background-color: #fff; color: #000; font-family: sans-serif;">
+                                <h2 style="margin-top: 0; border-bottom: 2px solid #333; padding-bottom: 8px;">【製本管理システム】日別作業スケジュール</h2>
+                                <p style="font-size: 14px; font-weight: bold;">対象作業日: {selected_print_date} （出力日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}）</p>
+                                <table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 13px;">
+                                    <thead>
+                                        <tr style="background-color: #f2f2f2;">
+                                            <th style="border: 1px solid #999; padding: 8px; width: 18%;">時間帯</th>
+                                            <th style="border: 1px solid #999; padding: 8px; width: 10%;">受注番号</th>
+                                            <th style="border: 1px solid #999; padding: 8px; width: 22%;">案件名（品名）</th>
+                                            <th style="border: 1px solid #999; padding: 8px; width: 15%;">顧客名</th>
+                                            <th style="border: 1px solid #999; padding: 8px; width: 15%;">工程</th>
+                                            <th style="border: 1px solid #999; padding: 8px; width: 10%;">作業時間</th>
+                                            <th style="border: 1px solid #999; padding: 8px; width: 10%;">納期</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                            """
+                            
+                            for _, d_row in df_day_target.iterrows():
+                                print_html += f"""
+                                        <tr>
+                                            <td style="border: 1px solid #999; padding: 6px;">{d_row['時間帯']}</td>
+                                            <td style="border: 1px solid #999; padding: 6px; text-align: center;">{d_row['受注番号']}</td>
+                                            <td style="border: 1px solid #999; padding: 6px;">{d_row['案件名']}</td>
+                                            <td style="border: 1px solid #999; padding: 6px;">{d_row['顧客名']}</td>
+                                            <td style="border: 1px solid #999; padding: 6px; font-weight: bold;">{d_row['工程']}</td>
+                                            <td style="border: 1px solid #999; padding: 6px; text-align: center;">{d_row['作業時間']}</td>
+                                            <td style="border: 1px solid #999; padding: 6px; text-align: center;">{d_row['納期']}</td>
+                                        </tr>
+                                """
+                                
+                            print_html += """
+                                    </tbody>
+                                </table>
+                                <p style="margin-top: 15px; font-size: 12px; color: #555;">※ ブラウザの印刷機能（Ctrl + P または Cmd + P）を呼び出し、送信先を「PDFに保存」に設定することで、このままPDFとして保存できます。</p>
+                            </div>
+                            """
+                            
+                            st.markdown(print_html, unsafe_allow_html=True)
+                            st.markdown("")
+                            if st.button("🖨️ この日のスケジュールを印刷 / PDF保存する"):
+                                st.info("💡 ブラウザの印刷ダイアログが開きますので、プリンターまたは「PDFに保存」を選択してください。\n\n※ キーボードの **[Ctrl] + [P]** （Macは **[Cmd] + [P]**）キーを押しても印刷・PDF保存が可能です。")
 
                         # ── @pocket書き戻し用CSVのダウンロード ──
                         st.markdown("---")
