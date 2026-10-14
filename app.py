@@ -11,9 +11,9 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ページ基本設定
-st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（マスタ自動化・手直し対応版）", layout="wide")
+st.set_page_config(page_title="製本管理業務 - ＆@pocket書き戻し（既存データ保護対応版）", layout="wide")
 
-st.title("📦 製本管理業務 - 機器稼働優先 ＆ 作業区分自動化システム")
+st.title("📦 製本管理業務 - 機器稼働優先 ＆ 作業区分マスタ管理システム")
 
 # ── 安全な整数変換ヘルパー関数 ──
 def safe_int(val, default=1):
@@ -124,7 +124,7 @@ else:
             if df_order_valid.empty:
                 st.warning("起算日以降の納期を持つ受注データが見つかりませんでした。")
             else:
-                # ── 2. 作業区分マスタの読み込みと自動割り当て ──
+                # ── 2. 作業区分マスタの読み込みと自動割り当て（既存データ保護ルール適用） ──
                 master_dict = {}
                 if f_master is not None:
                     try:
@@ -134,7 +134,7 @@ else:
                         except UnicodeDecodeError:
                             df_m = pd.read_csv(io.StringIO(m_bytes.decode('cp932', errors='ignore')))
                         df_m.columns = df_m.columns.str.strip()
-                        # '工程' と '作業区分' の列を探す
+                        
                         m_proc_col, m_div_col = None, None
                         for c in df_m.columns:
                             if '工程' in c: m_proc_col = c
@@ -147,35 +147,39 @@ else:
                     except Exception as me:
                         st.warning(f"作業区分マスタの読み込みに失敗しました: {me}")
 
-                # 作業区分カラムがない、または空の場合に自動補完
                 if '作業区分' not in df_order_valid.columns:
                     df_order_valid['作業区分'] = ""
 
                 def auto_assign_div(row):
                     current_div = str(row.get('作業区分', '')).strip()
-                    if current_div and current_div.lower() != 'nan':
+                    # 【既存データ保護ルール】すでに有効な作業区分（空欄でもNaNでもなく、「作業区分該当なし」でもない、または固有の入力値）がすでにある場合は上書きしない
+                    if current_div and current_div.lower() != 'nan' and current_div != '作業区分該当なし':
                         return current_div
+                    
                     proc = str(row.get('工程', '')).strip()
-                    # 1. マスタにあれば適用
-                    if proc in master_dict:
-                        return master_dict[proc]
-                    # 2. キーワード自動判定フォールバック
-                    if any(k in proc for k in ['綴じ', '無線', '中綴じ']):
-                        return '機械A'
-                    elif any(k in proc for k in ['断裁', '裁断', '三方']):
-                        return '機械B'
-                    elif any(k in proc for k in ['折', '折り']):
-                        return '機械C'
-                    elif any(k in proc for k in ['梱包', '検品', '箱']):
-                        return 'デスク'
+                    
+                    if f_master is not None:
+                        if proc in master_dict:
+                            return master_dict[proc]
+                        else:
+                            return "作業区分該当なし"
                     else:
-                        return 'エリア2FA'
+                        if any(k in proc for k in ['綴じ', '無線', '中綴じ']):
+                            return '機械A'
+                        elif any(k in proc for k in ['断裁', '裁断', '三方']):
+                            return '機械B'
+                        elif any(k in proc for k in ['折', '折り']):
+                            return '機械C'
+                        elif any(k in proc for k in ['梱包', '検品', '箱']):
+                            return 'デスク'
+                        else:
+                            return 'エリア2FA'
 
                 df_order_valid['作業区分'] = df_order_valid.apply(auto_assign_div, axis=1)
 
                 st.markdown("---")
                 st.subheader("📋 工程別データ確認 ＆ 作業区分の手直しエディタ")
-                st.markdown("💡 マスタやキーワードから自動判定された**「作業区分」**や除外したい行を確認・手動で直接書き換えてから計算を行えます。")
+                st.markdown("💡 既にデータ（作業区分）が入力されている箇所はマスタを読み込んでも書き換えられません。未登録の工程は**「作業区分該当なし」**になりますので、必要に応じてエディタで直接書き換えてください。")
 
                 df_editor_view = df_order_valid.copy()
                 df_editor_view.insert(0, "除外する", False)
@@ -184,7 +188,7 @@ else:
                     df_editor_view,
                     column_config={
                         "除外する": st.column_config.CheckboxColumn("除外する", default=False),
-                        "作業区分": st.column_config.TextColumn("作業区分（手動修正可能）"),
+                        "作業区分": st.column_config.TextColumn("作業区分（既存保護・手動修正可能）"),
                     },
                     hide_index=True,
                     use_container_width=True
@@ -317,7 +321,7 @@ else:
                             for row in sorted_rows:
                                 seq = safe_int(row.get("順", row.get("順番", 1)), 1)
                                 process = str(row.get("工程", ""))
-                                work_div = str(row.get("作業区分", "エリア2FA")) # 手直しされた最新の作業区分を使用
+                                work_div = str(row.get("作業区分", "作業区分該当なし"))
                                 staff_needed = safe_int(row.get("人員", 1), 1)
                                 leader = str(row.get("リーダー", "-"))
                                 record_id = str(row.get(id_col_name, "")) if id_col_name else ""
@@ -326,8 +330,7 @@ else:
                                 task_hours = duration_minutes / 60.0
                                 task_man_hours = staff_needed * task_hours
                                 
-                                # 機械かどうかの判定（作業区分に「機械」や「機械A/B/C」などが含まれる場合を排他制御対象とする）
-                                is_machine_work = any(kw in work_div for kw in ["機械", "機", "A", "B", "C"]) and not any(kw in work_div for kw in ["デスク", "外注", "エリア", "手作業"])
+                                is_machine_work = any(kw in work_div for kw in ["機械", "機", "A", "B", "C"]) and not any(kw in work_div for kw in ["デスク", "外注", "エリア", "手作業", "該当なし"])
                                 
                                 target_date = last_task_end_date
                                 target_slot = last_task_end_slot
@@ -521,7 +524,7 @@ else:
                     if selected_writeback_date != "すべて（全期間）":
                         df_pocket_export = df_pocket_export[df_pocket_export["割当作業日"] == selected_writeback_date]
                     
-                    df_pocket_export["完了ステータs"] = "完了" if status_choice == "完了" else ""
+                    df_pocket_export["完了ステータス"] = "完了" if status_choice == "完了" else ""
                     
                     df_pocket_export = df_pocket_export[[
                         "受注番号", "工程", "割当作業日", "時間帯", "完了ステータス", "明細レコードID"
