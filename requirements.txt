@@ -1,4 +1,2 @@
 streamlit
-pymupdf
-pillow
-pytesseract
+pandas
